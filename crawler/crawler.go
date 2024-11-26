@@ -141,6 +141,7 @@ func (c *Crawler) extractLinks(baseURL *url.URL, body string) ([]string, error) 
 					if err != nil || !c.isDomainAllowed(newURL.Host) {
 						continue
 					}
+					newURL.Fragment = ""
 					newLinks = append(newLinks, newURL.String())
 				}
 			}

@@ -6,12 +6,16 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 
 	"golang.org/x/net/html"
 )
+
+var findMetaRefreshRegexp = regexp.MustCompile(`<meta\s+http-equiv=["']?refresh["']?\s+content=["']?[^;]+;\s*url=([^"']+)["']?`)
+var findLinkRegexp = regexp.MustCompile(`https?://[^\s"']+`)
 
 // Crawler main structure for the crawler
 type Crawler struct {
@@ -118,7 +122,7 @@ func (c *Crawler) crawlURL(link string) {
 			links = append(links, newLocationURL)
 		}
 	} else {
-		linksDetails, err := c.extractLinks(baseURL, body)
+		linksDetails, err := c.extractLinks(baseURL, body, contentType)
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -182,7 +186,27 @@ func (c *Crawler) getURL(link string) (string, string, string, error) {
 }
 
 // Extract links from the URL body
-func (c *Crawler) extractLinks(baseURL *url.URL, body string) (map[string]bool, error) {
+func (c *Crawler) extractLinks(baseURL *url.URL, body string, contentType string) (map[string]bool, error) {
+	if contentType == "application/javascript" {
+		// Look for links in Javascript files
+		return extractLinksFromFile(body, baseURL), nil
+	}
+
+	linksDetails, err := c.extractLinksFromHTML(baseURL, body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract from meta refresh
+	if metaRefresh := extractMetaRefresh(body); metaRefresh != "" {
+		linksDetails[resolveURL(metaRefresh, baseURL)] = true
+	}
+
+	return linksDetails, nil
+}
+
+// Extract links from the URL body
+func (c *Crawler) extractLinksFromHTML(baseURL *url.URL, body string) (map[string]bool, error) {
 	doc, err := html.Parse(strings.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("Error parsing HTML body (%s)", err)
@@ -200,7 +224,7 @@ func (c *Crawler) extractLinks(baseURL *url.URL, body string) (map[string]bool, 
 					newLinks[resolveURL(val, baseURL)] = false
 				}
 
-			case "a", "link", "iframe", "embed", "object", "source":
+			case "a", "link", "iframe", "embed", "object", "source", "script":
 				val := getAttributeValue(n, []string{"src", "href"})
 				if len(val) > 0 {
 					newLinks[resolveURL(val, baseURL)] = true
@@ -284,4 +308,25 @@ func getAttributeValue(n *html.Node, keys []string) string {
 	}
 
 	return ""
+}
+
+func extractMetaRefresh(body string) string {
+	matches := findMetaRefreshRegexp.FindStringSubmatch(body)
+	if len(matches) > 1 {
+		return matches[1]
+	}
+
+	return ""
+}
+
+func extractLinksFromFile(body string, baseURL *url.URL) map[string]bool {
+	matches := findLinkRegexp.FindAllString(body, -1)
+
+	newLinks := map[string]bool{}
+
+	for _, match := range matches {
+		newLinks[resolveURL(match, baseURL)] = true
+	}
+
+	return newLinks
 }

@@ -189,8 +189,8 @@ func (c *Crawler) getURL(link string) (string, string, string, error) {
 
 // Extract links from the URL body
 func (c *Crawler) extractLinks(baseURL *url.URL, body string, contentType string) (map[string]bool, error) {
-	if contentType == "application/javascript" {
-		// Look for links in Javascript files
+	if strings.Contains(contentType, "/javascript") || strings.Contains(contentType, "/css") {
+		// Look for links in certain file types
 		return extractLinksFromFile(body, baseURL), nil
 	}
 

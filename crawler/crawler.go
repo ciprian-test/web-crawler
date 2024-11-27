@@ -19,14 +19,14 @@ type Crawler struct {
 	semaphore       chan struct{}  // Limit concurrency
 	mutex           sync.Mutex     // Synchronize access to crawled links data
 	wait            sync.WaitGroup // Wait for all routines to finish
-	discoveredLinks map[string]bool
+	discoveredLinks map[string]map[string]string
 }
 
 // NewCrawler creates a new Crawler with a max concurrency limit to avoid damaging the crawler website(s)
 func NewCrawler(maxConcurrency int) *Crawler {
 	return &Crawler{
 		allowedDomains:  []string{},
-		discoveredLinks: make(map[string]bool),
+		discoveredLinks: make(map[string]map[string]string),
 		semaphore:       make(chan struct{}, maxConcurrency),
 	}
 }
@@ -56,7 +56,17 @@ func (c *Crawler) PrintLinks() {
 	sort.Strings(links)
 
 	for _, link := range links {
+		details := c.discoveredLinks[link]
+
 		fmt.Println(link)
+
+		if val, ok := details["newLocation"]; ok {
+			fmt.Printf("\tRedirects to: %s\n", val)
+		}
+
+		if val, ok := details["err"]; ok {
+			fmt.Printf("\tError detected: %s\n", val)
+		}
 	}
 
 	fmt.Printf("Found %d unique links", len(links))
@@ -71,30 +81,48 @@ func (c *Crawler) crawlURL(link string) {
 
 	c.mutex.Lock()
 
-	if c.discoveredLinks[link] {
+	if _, ok := c.discoveredLinks[link]; ok {
 		c.mutex.Unlock()
 		return
 	}
 
-	c.discoveredLinks[link] = true
+	linkDetails := map[string]string{}
+
+	c.discoveredLinks[link] = linkDetails
 	c.mutex.Unlock()
 
 	baseURL, err := url.Parse(link)
 	if err != nil {
-		fmt.Printf("Error parsing URL (%s): %s", link, err)
+		linkDetails["err"] = fmt.Sprintf("Error parsing URL (%s)", err)
 		return
 	}
 
-	body, err := c.getURL(link)
+	body, contentType, location, err := c.getURL(link)
 	if err != nil {
-		fmt.Println(err)
+		linkDetails["err"] = err.Error()
 		return
 	}
 
-	links, err := c.extractLinks(baseURL, body)
-	if err != nil {
-		fmt.Println(err)
-		return
+	links := []string{}
+
+	linkDetails["contentType"] = contentType
+	if len(location) > 0 {
+		newLocationURL, err := baseURL.Parse(location)
+		if err != nil {
+			return
+		}
+
+		linkDetails["newLocation"] = newLocationURL.String()
+
+		if c.isLocationAllowed(location) {
+			links = append(links, location)
+		}
+	} else {
+		links, err = c.extractLinks(baseURL, body)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
 	}
 
 	for _, newLink := range links {
@@ -103,24 +131,42 @@ func (c *Crawler) crawlURL(link string) {
 	}
 }
 
-func (c *Crawler) getURL(link string) (string, error) {
-	resp, err := http.Get(link)
+func (c *Crawler) getURL(link string) (string, string, string, error) {
+	// Create a custom HTTP client that does not follow redirects
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// Return an error to prevent following redirects
+			return http.ErrUseLastResponse
+		},
+	}
+
+	req, err := http.NewRequest("GET", link, nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", "", "", err
 	}
 	defer resp.Body.Close()
 
+	contentType := resp.Header.Get("Content-Type")
+
+	if resp.StatusCode == http.StatusMovedPermanently || resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusPermanentRedirect {
+		location := resp.Header.Get("Location")
+		return "", contentType, location, nil
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("Unexpected status code (%d) for %s", resp.StatusCode, link)
+		return "", "", "", fmt.Errorf("%d status code", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Println("Error reading body:", err)
-		return "", fmt.Errorf("Error reading URL body (%s)", err)
+		return "", "", "", fmt.Errorf("Error reading URL body (%s)", err)
 	}
 
-	return string(body), nil
+	return string(body), contentType, "", nil
 }
 
 // Extract links from the URL body
@@ -163,4 +209,13 @@ func (c *Crawler) isDomainAllowed(domain string) bool {
 	}
 
 	return false
+}
+
+func (c *Crawler) isLocationAllowed(location string) bool {
+	locationURL, err := url.Parse(location)
+	if err != nil {
+		return false
+	}
+
+	return c.isDomainAllowed(locationURL.Host)
 }

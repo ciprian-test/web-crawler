@@ -47,7 +47,7 @@ func (c *Crawler) Crawl(startURL string) {
 }
 
 // PrintLinks print to the discovered links
-func (c *Crawler) PrintLinks() {
+func (c *Crawler) PrintLinks(includeDetails bool) {
 	links := make([]string, 0, len(c.discoveredLinks))
 	for link := range c.discoveredLinks {
 		links = append(links, link)
@@ -59,6 +59,10 @@ func (c *Crawler) PrintLinks() {
 		details := c.discoveredLinks[link]
 
 		fmt.Println(link)
+
+		if !includeDetails {
+			continue
+		}
 
 		if val, ok := details["newLocation"]; ok {
 			fmt.Printf("\tRedirects to: %s\n", val)
@@ -88,14 +92,14 @@ func (c *Crawler) crawlURL(link string) {
 
 	linkDetails := map[string]string{}
 
-	c.discoveredLinks[link] = linkDetails
-	c.mutex.Unlock()
-
 	baseURL, err := url.Parse(link)
-	if err != nil {
-		linkDetails["err"] = fmt.Sprintf("Error parsing URL (%s)", err)
+	if err != nil || !c.isDomainAllowed(baseURL.Host) {
+		c.mutex.Unlock()
 		return
 	}
+
+	c.discoveredLinks[link] = linkDetails
+	c.mutex.Unlock()
 
 	body, contentType, location, err := c.getURL(link)
 	if err != nil {
@@ -107,22 +111,30 @@ func (c *Crawler) crawlURL(link string) {
 
 	linkDetails["contentType"] = contentType
 	if len(location) > 0 {
-		newLocationURL, err := baseURL.Parse(location)
-		if err != nil {
-			return
-		}
+		newLocationURL := resolveURL(location, baseURL)
+		linkDetails["newLocation"] = newLocationURL
 
-		linkDetails["newLocation"] = newLocationURL.String()
-
-		if c.isLocationAllowed(location) {
-			links = append(links, location)
+		if c.isLocationAllowed(newLocationURL) {
+			links = append(links, newLocationURL)
 		}
 	} else {
-		links, err = c.extractLinks(baseURL, body)
+		linksDetails, err := c.extractLinks(baseURL, body)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
+
+		c.mutex.Lock()
+		for link, needsCrawling := range linksDetails {
+			if needsCrawling {
+				links = append(links, link)
+			} else if c.isDomainAllowedForLink(link) {
+				c.discoveredLinks[link] = map[string]string{}
+			}
+		}
+		c.mutex.Unlock()
+
+		links = uniqueStrings(links)
 	}
 
 	for _, newLink := range links {
@@ -170,25 +182,33 @@ func (c *Crawler) getURL(link string) (string, string, string, error) {
 }
 
 // Extract links from the URL body
-func (c *Crawler) extractLinks(baseURL *url.URL, body string) ([]string, error) {
+func (c *Crawler) extractLinks(baseURL *url.URL, body string) (map[string]bool, error) {
 	doc, err := html.Parse(strings.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("Error parsing HTML body (%s)", err)
 	}
 
-	var newLinks []string
+	newLinks := map[string]bool{}
 
 	var traverse func(*html.Node)
 	traverse = func(n *html.Node) {
-		if n.Type == html.ElementNode && n.Data == "a" {
-			for _, attr := range n.Attr {
-				if attr.Key == "href" {
-					newURL, err := baseURL.Parse(attr.Val)
-					if err != nil || !c.isDomainAllowed(newURL.Host) {
-						continue
-					}
-					newURL.Fragment = ""
-					newLinks = append(newLinks, newURL.String())
+		if n.Type == html.ElementNode {
+			switch n.Data {
+			case "img":
+				val := getAttributeValue(n, []string{"src"})
+				if len(val) > 0 {
+					newLinks[resolveURL(val, baseURL)] = false
+				}
+
+			case "a", "link", "iframe", "embed", "object", "source":
+				val := getAttributeValue(n, []string{"src", "href"})
+				if len(val) > 0 {
+					newLinks[resolveURL(val, baseURL)] = true
+				}
+			case "form":
+				val := getAttributeValue(n, []string{"action"})
+				if len(val) > 0 {
+					newLinks[resolveURL(val, baseURL)] = false
 				}
 			}
 		}
@@ -211,6 +231,15 @@ func (c *Crawler) isDomainAllowed(domain string) bool {
 	return false
 }
 
+func (c *Crawler) isDomainAllowedForLink(link string) bool {
+	linkURL, err := url.Parse(link)
+	if err != nil {
+		return false
+	}
+
+	return c.isDomainAllowed(linkURL.Host)
+}
+
 func (c *Crawler) isLocationAllowed(location string) bool {
 	locationURL, err := url.Parse(location)
 	if err != nil {
@@ -218,4 +247,41 @@ func (c *Crawler) isLocationAllowed(location string) bool {
 	}
 
 	return c.isDomainAllowed(locationURL.Host)
+}
+
+func resolveURL(link string, baseURL *url.URL) string {
+	parsed, err := baseURL.Parse(link)
+	if err != nil {
+		return ""
+	}
+
+	parsed.Fragment = ""
+
+	return parsed.String()
+}
+
+func uniqueStrings(input []string) []string {
+	seen := make(map[string]bool)
+	unique := []string{}
+
+	for _, str := range input {
+		if _, exists := seen[str]; !exists {
+			seen[str] = true
+			unique = append(unique, str)
+		}
+	}
+
+	return unique
+}
+
+func getAttributeValue(n *html.Node, keys []string) string {
+	for _, attr := range n.Attr {
+		for _, key := range keys {
+			if attr.Key == key {
+				return attr.Val
+			}
+		}
+	}
+
+	return ""
 }

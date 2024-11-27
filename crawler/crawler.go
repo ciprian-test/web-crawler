@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/net/html"
 )
@@ -154,6 +155,7 @@ func (c *Crawler) getURL(link string) (string, string, string, error) {
 			// Return an error to prevent following redirects
 			return http.ErrUseLastResponse
 		},
+		Timeout: 10 * time.Second,
 	}
 
 	req, err := http.NewRequest("GET", link, nil)

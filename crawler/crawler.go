@@ -248,6 +248,10 @@ func (c *Crawler) extractLinksFromHTML(baseURL *url.URL, body string) (map[strin
 }
 
 func (c *Crawler) isDomainAllowed(domain string) bool {
+	if len(c.allowedDomains) == 0 {
+		return true
+	}
+
 	for _, allowedDomain := range c.allowedDomains {
 		if allowedDomain == domain || strings.Index(domain, "."+allowedDomain) > 0 {
 			return true
